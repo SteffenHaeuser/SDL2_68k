@@ -1,0 +1,80 @@
+# SDL2_gfx static build for AmigaOS 3.x (m68k)
+# Builds separate clib2 and libnix variants, including shipped tests.
+
+PREFIX := /opt/amiga/m68k-amigaos
+CC := m68k-amigaos-gcc
+AR := m68k-amigaos-ar
+RANLIB := m68k-amigaos-ranlib
+MKDIR := mkdir -p
+CP := cp
+
+CPUFLAGS := -mcpu=68040 -mhard-float
+OPTFLAGS := -O3
+WARNFLAGS := -Wall -Wextra
+MATH_BUILTIN_FLAGS := \
+	-fno-builtin-floor \
+	-fno-builtin-ceil \
+	-fno-builtin-sin \
+	-fno-builtin-cos \
+	-fno-builtin-log10
+CRTFLAGS :=
+CFLAGS := $(CPUFLAGS) $(OPTFLAGS) $(WARNFLAGS) $(MATH_BUILTIN_FLAGS) $(CRTFLAGS)
+CPPFLAGS := -I$(PREFIX)/include/SDL2 -I.
+LDFLAGS := $(CPUFLAGS) $(CRTFLAGS)
+SDL2_LIBS := -lSDL2
+SDL2_TEST_LIBS := -lSDL2_test
+MATH_LIBS := -lm -lminigl -latomic
+
+BUILD_DIR := build/default
+OBJ_DIR := $(BUILD_DIR)/obj
+TEST_OBJ_DIR := $(BUILD_DIR)/testobj
+BIN_DIR := $(BUILD_DIR)/bin
+LIB_DIR := $(BUILD_DIR)/lib
+LIBNAME := libSDL2_gfx.a
+LIB := $(LIB_DIR)/$(LIBNAME)
+
+LIB_SOURCES := SDL2_framerate.c SDL2_gfxPrimitives.c SDL2_imageFilter.c SDL2_rotozoom.c
+LIB_OBJECTS := $(patsubst %.c,$(OBJ_DIR)/%.o,$(LIB_SOURCES))
+TEST_PROGRAMS := $(BIN_DIR)/testgfx $(BIN_DIR)/testimagefilter $(BIN_DIR)/testrotozoom $(BIN_DIR)/testframerate
+TEST_ASSETS := test/sample2x2.bmp test/sample3x3.bmp test/sample8.bmp test/sample8-box.bmp test/sample16x16.bmp test/sample24.bmp test/sample24-box.bmp
+
+.PHONY: all clib2 libnix build library tests assets clean
+all: clib2 libnix
+
+clib2:
+	$(MAKE) -f Makefile.amigaos3 build BUILD_DIR=build/clib2 CRTFLAGS=-mcrt=clib2 LIBNAME=libSDL2_gfx.a SDL2_LIBS=-lSDL2 SDL2_TEST_LIBS=-lSDL2_test
+
+libnix:
+	$(MAKE) -f Makefile.amigaos3 build BUILD_DIR=build/libnix CRTFLAGS=-noixemul LIBNAME=libSDL2_gfx_libnix.a SDL2_LIBS=-lSDL2_libnix SDL2_TEST_LIBS=-lSDL2_test_libnix
+
+build: library tests
+library: $(LIB)
+tests: $(TEST_PROGRAMS) assets
+
+$(LIB): $(LIB_OBJECTS) | $(LIB_DIR)
+	$(AR) rcs $@ $(LIB_OBJECTS)
+	$(RANLIB) $@
+
+$(OBJ_DIR)/%.o: %.c | $(OBJ_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(TEST_OBJ_DIR)/%.o: test/%.c | $(TEST_OBJ_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(BIN_DIR)/testgfx: $(TEST_OBJ_DIR)/testgfx.o $(LIB) | $(BIN_DIR)
+	$(CC) $(LDFLAGS) -o $@ $< $(LIB) $(SDL2_TEST_LIBS) $(SDL2_LIBS) $(MATH_LIBS)
+$(BIN_DIR)/testimagefilter: $(TEST_OBJ_DIR)/testimagefilter.o $(LIB) | $(BIN_DIR)
+	$(CC) $(LDFLAGS) -o $@ $< $(LIB) $(SDL2_LIBS) $(MATH_LIBS)
+$(BIN_DIR)/testrotozoom: $(TEST_OBJ_DIR)/testrotozoom.o $(LIB) | $(BIN_DIR)
+	$(CC) $(LDFLAGS) -o $@ $< $(LIB) $(SDL2_TEST_LIBS) $(SDL2_LIBS) $(MATH_LIBS)
+$(BIN_DIR)/testframerate: $(TEST_OBJ_DIR)/testframerate.o $(LIB) | $(BIN_DIR)
+	$(CC) $(LDFLAGS) -o $@ $< $(LIB) $(SDL2_TEST_LIBS) $(SDL2_LIBS) $(MATH_LIBS)
+
+assets: | $(BIN_DIR)
+	$(CP) $(TEST_ASSETS) $(BIN_DIR)/
+
+$(OBJ_DIR) $(TEST_OBJ_DIR) $(BIN_DIR) $(LIB_DIR):
+	$(MKDIR) $@
+
+clean:
+	rm -rf build

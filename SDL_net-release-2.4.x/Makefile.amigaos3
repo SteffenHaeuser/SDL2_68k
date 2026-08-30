@@ -1,0 +1,96 @@
+# Classical AmigaOS 3.x / m68k Makefile for SDL2_net 2.4.x
+# Builds clib2 and libnix static libraries plus shipped examples.
+
+PREFIX := /opt/amiga/m68k-amigaos
+SDL2_INC := /opt/amiga-6.5.0b/m68k-amigaos/ndk-include/SDL2
+CC := m68k-amigaos-gcc
+AR := m68k-amigaos-ar
+RANLIB := m68k-amigaos-ranlib
+MKDIR := mkdir -p
+CP := cp
+
+CPUFLAGS := -mcpu=68040 -mhard-float
+OPTFLAGS := -O3
+WARNFLAGS := -Wall -Wextra
+MATH_BUILTIN_FLAGS := \
+	-fno-builtin-floor \
+	-fno-builtin-ceil \
+	-fno-builtin-sin \
+	-fno-builtin-cos \
+	-fno-builtin-log10
+CRTFLAGS :=
+CFLAGS := $(CPUFLAGS) $(OPTFLAGS) $(WARNFLAGS) $(MATH_BUILTIN_FLAGS) $(CRTFLAGS) -DSDLNET_AMIGAOS=1
+CPPFLAGS := -Iinclude -I$(SDL2_INC)
+LDFLAGS := $(CPUFLAGS) $(CRTFLAGS)
+
+SDL2_LIBS := -lSDL2
+SDL2_TEST_LIBS := -lSDL2_test
+SYS_LIBS := -lm -lminigl -latomic
+
+BUILD_DIR := build/default
+OBJ_DIR := $(BUILD_DIR)/obj
+LIB_DIR := $(BUILD_DIR)/lib
+BIN_DIR := $(BUILD_DIR)/bin
+LIBNAME := libSDL2_net.a
+LIB := $(LIB_DIR)/$(LIBNAME)
+
+SRCS := \
+	src/SDLnet.c \
+	src/SDLnetTCP.c \
+	src/SDLnetUDP.c \
+	src/SDLnetselect.c
+OBJS := $(patsubst %.c,$(OBJ_DIR)/%.o,$(SRCS))
+
+EXAMPLES := $(BIN_DIR)/chat $(BIN_DIR)/chatd $(BIN_DIR)/showinterfaces
+
+.PHONY: all clib2 libnix build library examples clean install
+all: clib2 libnix
+
+clib2:
+	$(MAKE) -f Makefile.amigaos3 build \
+		BUILD_DIR=build/clib2 \
+		CRTFLAGS=-mcrt=clib2 \
+		LIBNAME=libSDL2_net.a \
+		SDL2_LIBS=-lSDL2 \
+		SDL2_TEST_LIBS=-lSDL2_test
+
+libnix:
+	$(MAKE) -f Makefile.amigaos3 build \
+		BUILD_DIR=build/libnix \
+		CRTFLAGS=-noixemul \
+		LIBNAME=libSDL2_net_libnix.a \
+		SDL2_LIBS=-lSDL2_libnix \
+		SDL2_TEST_LIBS=-lSDL2_test_libnix
+
+build: library examples
+library: $(LIB)
+examples: $(EXAMPLES)
+
+$(LIB): $(OBJS) | $(LIB_DIR)
+	$(AR) rcs $@ $(OBJS)
+	$(RANLIB) $@
+
+$(OBJ_DIR)/%.o: %.c
+	@$(MKDIR) $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(BIN_DIR)/chat: examples/chat.c examples/chat.h $(LIB) | $(BIN_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LIB) $(SDL2_TEST_LIBS) $(SDL2_LIBS) $(SYS_LIBS) $(LDFLAGS) -o $@
+
+$(BIN_DIR)/chatd: examples/chatd.c examples/chat.h $(LIB) | $(BIN_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LIB) $(SDL2_LIBS) $(SYS_LIBS) $(LDFLAGS) -o $@
+
+$(BIN_DIR)/showinterfaces: examples/showinterfaces.c $(LIB) | $(BIN_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LIB) $(SDL2_LIBS) $(SYS_LIBS) $(LDFLAGS) -o $@
+
+$(LIB_DIR) $(BIN_DIR):
+	$(MKDIR) $@
+
+install: $(LIB)
+	$(MKDIR) $(PREFIX)/lib
+	$(MKDIR) $(PREFIX)/include
+	$(CP) $(LIB) $(PREFIX)/lib/$(LIBNAME)
+	$(CP) include/SDL_net.h $(PREFIX)/include/
+
+clean:
+	rm -rf build

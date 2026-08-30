@@ -1,0 +1,82 @@
+# SDL2_mixer static build for AmigaOS 3.x (m68k)
+# Builds separate clib2 and libnix variants.
+
+PREFIX := /opt/amiga/m68k-amigaos
+CC := m68k-amigaos-gcc
+AR := m68k-amigaos-ar
+RANLIB := m68k-amigaos-ranlib
+INSTALL := install
+MKDIR := mkdir -p
+
+SDL2_INC := $(PREFIX)/include/SDL2
+LIBDIR := $(PREFIX)/lib
+INCLUDEDIR := $(PREFIX)/include/SDL2
+
+ENABLE_OGG := 1
+ENABLE_MP3_MPG123 := 1
+ENABLE_FLAC := 1
+ENABLE_MODPLUG := 1
+
+CPUFLAGS := -mcpu=68040 -mhard-float
+OPTFLAGS := -O3 -ffast-math
+MATH_BUILTIN_FLAGS := \
+	-fno-builtin-floor \
+	-fno-builtin-ceil \
+	-fno-builtin-sin \
+	-fno-builtin-cos \
+	-fno-builtin-log10
+CRTFLAGS :=
+CFLAGS := $(CPUFLAGS) $(OPTFLAGS) -fno-strict-aliasing -D_REENTRANT -DNO_SSE -DNO_MMX $(MATH_BUILTIN_FLAGS) $(CRTFLAGS) -I$(SDL2_INC) -Isrc -Isrc/codecs -I.
+LDFLAGS := $(CPUFLAGS) $(CRTFLAGS)
+SDL2_LIBS := -lSDL2
+
+SRC := src/effect_position.c src/effects_internal.c src/mixer.c src/music.c src/codecs/music_wav.c src/codecs/load_voc.c src/codecs/load_aiff.c
+ifeq ($(ENABLE_OGG),1)
+SRC += src/codecs/music_ogg.c
+endif
+ifeq ($(ENABLE_MP3_MPG123),1)
+SRC += src/codecs/music_mpg123.c
+endif
+ifeq ($(ENABLE_FLAC),1)
+SRC += src/codecs/music_flac.c
+endif
+ifeq ($(ENABLE_MODPLUG),1)
+SRC += src/codecs/music_modplug.c
+endif
+
+BUILD_DIR := build/default
+OBJ_DIR := $(BUILD_DIR)/obj
+LIB_DIR := $(BUILD_DIR)/lib
+LIBNAME := libSDL2_mixer.a
+TARGET := $(LIB_DIR)/$(LIBNAME)
+OBJ := $(patsubst %.c,$(OBJ_DIR)/%.o,$(SRC))
+
+.PHONY: all clib2 libnix build clean install
+all: clib2 libnix
+
+clib2:
+	$(MAKE) -f Makefile.amigaos3 build BUILD_DIR=build/clib2 CRTFLAGS=-mcrt=clib2 LIBNAME=libSDL2_mixer.a SDL2_LIBS=-lSDL2
+
+libnix:
+	$(MAKE) -f Makefile.amigaos3 build BUILD_DIR=build/libnix CRTFLAGS=-noixemul LIBNAME=libSDL2_mixer_libnix.a SDL2_LIBS=-lSDL2_libnix
+
+build: $(TARGET)
+
+$(TARGET): $(OBJ) | $(LIB_DIR)
+	$(AR) rcs $@ $(OBJ)
+	$(RANLIB) $@
+
+$(OBJ_DIR)/%.o: %.c
+	@$(MKDIR) $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(LIB_DIR):
+	$(MKDIR) $@
+
+install: $(TARGET)
+	$(INSTALL) -d $(LIBDIR) $(INCLUDEDIR)
+	$(INSTALL) -m 644 $(TARGET) $(LIBDIR)/$(LIBNAME)
+	$(INSTALL) -m 644 include/SDL_mixer.h $(INCLUDEDIR)/
+
+clean:
+	rm -rf build

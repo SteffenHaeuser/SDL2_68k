@@ -1,0 +1,19 @@
+# Convenience wrapper: build both 68k C runtime variants independently.
+
+.PHONY: all clib2 libnix gl-examples clean
+
+all: clib2 libnix
+
+clib2:
+	$(MAKE) -f Makefile
+
+libnix:
+	$(MAKE) -f Makefile.libnix
+
+gl-examples:
+	$(MAKE) -f Makefile gl-example
+	$(MAKE) -f Makefile.libnix gl-example
+
+clean:
+	$(MAKE) -f Makefile clean
+	$(MAKE) -f Makefile.libnix clean

@@ -1,0 +1,104 @@
+# SDL2_sound static build for AmigaOS 3.x (m68k), MIDI disabled.
+# Builds separate clib2 and libnix variants.
+
+PREFIX := /opt/amiga/m68k-amigaos
+CC := m68k-amigaos-gcc
+AR := m68k-amigaos-ar
+RANLIB := m68k-amigaos-ranlib
+MKDIR := mkdir -p
+
+CPUFLAGS := -mcpu=68040 -mhard-float
+OPTFLAGS := -O3
+WARNFLAGS := -Wall -Wextra
+MATH_BUILTIN_FLAGS := \
+	-fno-builtin-floor \
+	-fno-builtin-ceil \
+	-fno-builtin-sin \
+	-fno-builtin-cos \
+	-fno-builtin-log10
+CRTFLAGS :=
+CFLAGS := $(CPUFLAGS) $(OPTFLAGS) $(WARNFLAGS) -fno-strict-aliasing $(MATH_BUILTIN_FLAGS) $(CRTFLAGS)
+INCLUDES := -Isrc -I$(PREFIX)/include -I$(PREFIX)/include/SDL2 -I.
+LIBDIR := $(PREFIX)/lib
+
+ENABLE_FLAC := 1
+ENABLE_MP3 := 1
+ENABLE_VORBIS := 1
+ENABLE_MODPLUG := 1
+ENABLE_SHN := 0
+ENABLE_COREAUDIO := 0
+ENABLE_MIDI := 0
+USE_LIBFLAC := 0
+USE_MPG123 := 0
+USE_LIBMAD := 0
+USE_LIBVORBIS := 0
+
+SRCS := src/SDL_sound.c src/SDL_sound_aiff.c src/SDL_sound_au.c src/SDL_sound_raw.c src/SDL_sound_voc.c src/SDL_sound_wav.c
+ifeq ($(ENABLE_FLAC),1)
+SRCS += src/SDL_sound_flac.c
+endif
+ifeq ($(ENABLE_MP3),1)
+SRCS += src/SDL_sound_mp3.c
+endif
+ifeq ($(ENABLE_VORBIS),1)
+SRCS += src/SDL_sound_vorbis.c
+endif
+ifeq ($(ENABLE_MODPLUG),1)
+SRCS += src/SDL_sound_modplug.c
+INCLUDES += -Isrc/libmodplug
+endif
+ifeq ($(ENABLE_SHN),1)
+SRCS += src/SDL_sound_shn.c
+endif
+ifeq ($(ENABLE_COREAUDIO),1)
+SRCS += src/SDL_sound_coreaudio.c
+endif
+
+ifeq ($(ENABLE_FLAC)$(USE_LIBFLAC),10)
+CFLAGS += -DSOUND_USE_DR_FLAC
+endif
+ifeq ($(ENABLE_MP3)$(USE_MPG123)$(USE_LIBMAD),100)
+CFLAGS += -DSOUND_USE_DR_MP3
+endif
+ifeq ($(ENABLE_VORBIS)$(USE_LIBVORBIS),10)
+CFLAGS += -DSOUND_USE_STB_VORBIS
+endif
+ifeq ($(ENABLE_COREAUDIO),0)
+CFLAGS += -DDISABLE_COREAUDIO
+endif
+
+BUILD_DIR := build/default
+OBJ_DIR := $(BUILD_DIR)/obj
+LIB_DIR := $(BUILD_DIR)/lib
+LIBNAME := libSDL2_sound.a
+OUTFILE := $(LIB_DIR)/$(LIBNAME)
+OBJS := $(patsubst %.c,$(OBJ_DIR)/%.o,$(SRCS))
+
+.PHONY: all clib2 libnix build clean install
+all: clib2 libnix
+
+clib2:
+	$(MAKE) -f Makefile.amigaos3 build BUILD_DIR=build/clib2 CRTFLAGS=-mcrt=clib2 LIBNAME=libSDL2_sound.a
+
+libnix:
+	$(MAKE) -f Makefile.amigaos3 build BUILD_DIR=build/libnix CRTFLAGS=-noixemul LIBNAME=libSDL2_sound_libnix.a
+
+build: $(OUTFILE)
+
+$(OUTFILE): $(OBJS) | $(LIB_DIR)
+	$(AR) rcs $@ $(OBJS)
+	$(RANLIB) $@
+
+$(OBJ_DIR)/%.o: %.c
+	@$(MKDIR) $(dir $@)
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+$(LIB_DIR):
+	$(MKDIR) $@
+
+install: $(OUTFILE)
+	$(MKDIR) $(LIBDIR)
+	cp $(OUTFILE) $(LIBDIR)/$(LIBNAME)
+
+clean:
+	rm -rf build

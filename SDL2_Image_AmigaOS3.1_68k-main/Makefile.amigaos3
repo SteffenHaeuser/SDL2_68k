@@ -1,0 +1,112 @@
+# SDL2_image static build for AmigaOS 3.x (m68k)
+# Builds separate clib2 and libnix variants.
+
+PREFIX   := /opt/amiga/m68k-amigaos
+CC       := m68k-amigaos-gcc
+AR       := m68k-amigaos-ar
+RANLIB   := m68k-amigaos-ranlib
+INSTALL  := install
+MKDIR    := mkdir -p
+RM       := rm -f
+
+SDL2_INC := $(PREFIX)/include/SDL2
+LIBDIR   := $(PREFIX)/lib
+INCLUDEDIR := $(PREFIX)/include/SDL2
+
+ENABLE_PNG        := 1
+ENABLE_JPG        := 1
+ENABLE_TIF        := 1
+ENABLE_WEBP       := 1
+ENABLE_WEBP_DEMUX := 1
+
+CPUFLAGS := -mcpu=68040 -mhard-float
+OPTFLAGS := -O3 -ffast-math
+WARNFLAGS := -Wall -Wextra
+MATH_BUILTIN_FLAGS := \
+	-fno-builtin-floor \
+	-fno-builtin-ceil \
+	-fno-builtin-sin \
+	-fno-builtin-cos \
+	-fno-builtin-log10
+CRTFLAGS :=
+
+CPPFLAGS := -I$(PREFIX)/include -I$(SDL2_INC) -Iinclude -Isrc -I.
+CFLAGS := $(CPUFLAGS) $(OPTFLAGS) $(WARNFLAGS) -fno-strict-aliasing $(MATH_BUILTIN_FLAGS) $(CRTFLAGS)
+LDFLAGS := $(CPUFLAGS) $(CRTFLAGS)
+
+SDL2_LIBS := -lSDL2
+
+ifeq ($(ENABLE_PNG),1)
+CPPFLAGS += -DLOAD_PNG
+CODEC_LIBS += -lpng16 -lz
+endif
+ifeq ($(ENABLE_JPG),1)
+CPPFLAGS += -DLOAD_JPG
+CODEC_LIBS += -ljpeg
+endif
+ifeq ($(ENABLE_TIF),1)
+CPPFLAGS += -DLOAD_TIF
+CODEC_LIBS += -ltiff -lz -ljpeg
+endif
+ifeq ($(ENABLE_WEBP),1)
+CPPFLAGS += -DLOAD_WEBP
+CODEC_LIBS += -lwebp
+ifeq ($(ENABLE_WEBP_DEMUX),1)
+CPPFLAGS += -DHAVE_WEBP_DEMUX
+CODEC_LIBS += -lwebpdemux
+endif
+endif
+
+MATH_LIBS := -lm
+
+BUILD_DIR := build/default
+OBJ_DIR := $(BUILD_DIR)/obj
+BIN_DIR := $(BUILD_DIR)/bin
+LIB_DIR := $(BUILD_DIR)/lib
+LIBNAME := libSDL2_image.a
+LIB := $(LIB_DIR)/$(LIBNAME)
+
+CORE_SRCS := src/IMG.c src/IMG_WIC.c
+PNG_SRCS := $(if $(filter 1,$(ENABLE_PNG)),src/IMG_png.c,)
+JPG_SRCS := $(if $(filter 1,$(ENABLE_JPG)),src/IMG_jpg.c,)
+TIF_SRCS := $(if $(filter 1,$(ENABLE_TIF)),src/IMG_tif.c,)
+WEBP_SRCS := $(if $(filter 1,$(ENABLE_WEBP)),src/IMG_webp.c,)
+COMMON_MAYBE := \
+ src/IMG_stb.c src/IMG_avif.c src/IMG_bmp.c src/IMG_gif.c src/IMG_jxl.c \
+ src/IMG_lbm.c src/IMG_pcx.c src/IMG_pnm.c src/IMG_qoi.c src/IMG_svg.c \
+ src/IMG_tga.c src/IMG_xcf.c src/IMG_xpm.c src/IMG_xv.c
+SRCS := $(filter-out $(foreach f,$(COMMON_MAYBE),$(if $(wildcard $(f)),,$(f))),$(CORE_SRCS) $(PNG_SRCS) $(JPG_SRCS) $(TIF_SRCS) $(WEBP_SRCS) $(COMMON_MAYBE))
+OBJS := $(patsubst %.c,$(OBJ_DIR)/%.o,$(SRCS))
+
+.PHONY: all clib2 libnix build clean install test
+all: clib2 libnix
+
+clib2:
+	$(MAKE) -f Makefile.amigaos3 build BUILD_DIR=build/clib2 CRTFLAGS=-mcrt=clib2 LIBNAME=libSDL2_image.a SDL2_LIBS=-lSDL2
+
+libnix:
+	$(MAKE) -f Makefile.amigaos3 build BUILD_DIR=build/libnix CRTFLAGS=-noixemul LIBNAME=libSDL2_image_libnix.a SDL2_LIBS=-lSDL2_libnix
+
+build: $(LIB)
+
+$(LIB): $(OBJS) | $(LIB_DIR)
+	$(AR) rcs $@ $(OBJS)
+	$(RANLIB) $@
+
+$(OBJ_DIR)/%.o: %.c
+	@$(MKDIR) $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(LIB_DIR) $(BIN_DIR):
+	$(MKDIR) $@
+
+test: $(LIB) | $(BIN_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $(BIN_DIR)/test_sdl2_image test_sdl2_image.c $(LIB) -L$(LIBDIR) $(CODEC_LIBS) $(SDL2_LIBS) $(MATH_LIBS)
+
+install: $(LIB)
+	$(INSTALL) -d $(INCLUDEDIR) $(LIBDIR)
+	$(INSTALL) -m 644 $(LIB) $(LIBDIR)/$(LIBNAME)
+	@if [ -f include/SDL_image.h ]; then $(INSTALL) -m 644 include/SDL_image.h $(INCLUDEDIR)/; elif [ -f SDL_image.h ]; then $(INSTALL) -m 644 SDL_image.h $(INCLUDEDIR)/; fi
+
+clean:
+	rm -rf build
