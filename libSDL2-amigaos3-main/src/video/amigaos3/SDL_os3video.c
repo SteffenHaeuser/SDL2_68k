@@ -25,7 +25,9 @@
 #include "SDL_os3framebuffer.h"
 #include "SDL_os3events.h"
 #include "SDL_os3mouse.h"
+#if defined(SDL_VIDEO_OPENGL)
 #include "SDL_os3opengl.h"
+#endif
 #include "../SDL_sysvideo.h"
 #include "../../events/SDL_events_c.h"
 

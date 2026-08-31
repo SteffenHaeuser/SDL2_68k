@@ -1,456 +1,519 @@
-#include "SDL_internal.h"
+/*
+  SDL2 Video Driver -- AmigaOS 3.x (CyberGraphX)
+  Window management: open/close Intuition windows and screens.
+
+  Default strategy: windowed on Workbench screen.
+  SDL_WINDOW_FULLSCREEN: open a custom CGX screen + borderless window.
+
+  Reference: cybergraphx-reference.md -- Window Management section
+             crash-patterns.md -- #7 (stack), #10 (large buffers)
+*/
+
+#include "../../SDL_internal.h"
 
 #if SDL_VIDEO_DRIVER_AMIGAOS3
 
-#include "SDL_os3window.h"
-#include "SDL_os3modes.h"
-#if !defined(SDL_AMIGAOS3_SW_ONLY)
-#include <proto/minigl.h>
+#ifdef WARPUP
+#pragma pack(push,2)
 #endif
+#include <graphics/modeid.h>   /* BIDTAG_* for BestModeID (AGA mode selection) */
+#include <graphics/displayinfo.h>  /* DisplayInfo, DimensionInfo for P96 fallback */
+#ifdef WARPUP
+#pragma pop
+#endif
+#include "SDL_os3video.h"
+#include "SDL_os3window.h"
+#include "SDL_os3framebuffer.h"
+#include "SDL_os3opengl.h"
+#include "../../events/SDL_windowevents_c.h"
 
-static bool OS3_SetupData(SDL_Window *window, struct Window *syswin)
+/*
+ * Find an RTG mode >= requested size and depth by manually walking
+ * the display database. Fallback for when BestCModeIDTags() fails
+ * (e.g. Picasso96 without cybergraphics.library on Vampire SAGA).
+ */
+ULONG OS3_FindRTGMode(int want_w, int want_h, int want_depth)
 {
-    SDL_WindowData *d = (SDL_WindowData *)SDL_calloc(1, sizeof(*d));
-    if (!d) {
+    ULONG nextid;
+    ULONG best_id = INVALID_ID;
+    ULONG best_w = 0xFFFFFFFF, best_h = 0xFFFFFFFF;
+
+    nextid = NextDisplayInfo(INVALID_ID);
+    while (nextid != INVALID_ID) {
+        int is_rtg = 0;
+        ULONG w, h, bpp;
+
+        if (CyberGfxBase && IsCyberModeID(nextid)) {
+            w   = GetCyberIDAttr(CYBRIDATTR_WIDTH,  nextid);
+            h   = GetCyberIDAttr(CYBRIDATTR_HEIGHT, nextid);
+            bpp = GetCyberIDAttr(CYBRIDATTR_DEPTH,  nextid);
+            is_rtg = 1;
+        } else {
+            struct DisplayInfo di;
+            if (GetDisplayInfoData(NULL, (UBYTE *)&di, sizeof(di),
+                                   DTAG_DISP, nextid)) {
+                if (di.PropertyFlags & (1UL << 12)) {
+                    struct DimensionInfo dim;
+                    if (GetDisplayInfoData(NULL, (UBYTE *)&dim,
+                            sizeof(dim), DTAG_DIMS, nextid)) {
+                        w   = dim.Nominal.MaxX - dim.Nominal.MinX + 1;
+                        h   = dim.Nominal.MaxY - dim.Nominal.MinY + 1;
+                        bpp = dim.MaxDepth;
+                        is_rtg = 1;
+                    }
+                }
+            }
+        }
+
+        if (is_rtg && (int)w >= want_w && (int)h >= want_h &&
+            (int)bpp >= want_depth) {
+            /* Prefer smallest mode that fits */
+            if (w < best_w || (w == best_w && h < best_h)) {
+                best_w = w;
+                best_h = h;
+                best_id = nextid;
+            }
+        }
+        nextid = NextDisplayInfo(nextid);
+    }
+    return best_id;
+}
+
+/* Window flags for windowed mode */
+#define OS3_WFLG_WINDOWED \
+    (WFLG_DRAGBAR    | \
+     WFLG_DEPTHGADGET| \
+     WFLG_CLOSEGADGET| \
+     WFLG_ACTIVATE   | \
+     WFLG_RMBTRAP    | \
+     WFLG_REPORTMOUSE)
+
+/* Window flags for fullscreen mode */
+#define OS3_WFLG_FULLSCREEN \
+    (WFLG_BORDERLESS | \
+     WFLG_ACTIVATE   | \
+     WFLG_RMBTRAP    | \
+     WFLG_REPORTMOUSE)
+
+/* --- Internal: close window and screen, leaving driverdata allocated --- */
+static void OS3_CloseWindowAndScreen(OS3_WindowData *data)
+{
+    if (data->window) {
+        ClearPointer(data->window);
+        CloseWindow(data->window);
+        data->window = NULL;
+    }
+    if (data->screen) {
+        /* Free CHIP RAM empty pointer if we allocated one (stored in UserData) */
+        if (data->screen->UserData) {
+            FreeMem(data->screen->UserData, 6 * sizeof(UWORD));
+            data->screen->UserData = NULL;
+        }
+        CloseScreen(data->screen);
+        data->screen = NULL;
+    }
+    data->is_fullscreen = 0;
+}
+
+/* --- Internal: open a custom screen + borderless window --- */
+static int OS3_OpenScreen(OS3_WindowData *data, int w, int h,
+                          ULONG modeid, int depth)
+{
+    struct Screen *screen;
+    struct Window *iwin;
+
+    screen = OpenScreenTags(NULL,
+        SA_Title,      (ULONG)"SDL",
+        SA_Quiet,      TRUE,
+        SA_ShowTitle,  FALSE,
+        SA_Depth,      (ULONG)depth,
+        SA_DisplayID,  modeid,
+        SA_Type,       CUSTOMSCREEN,
+        SA_Exclusive,  TRUE,
+        SA_Draggable,  FALSE,
+        SA_AutoScroll, FALSE,
+        TAG_DONE
+    );
+    if (!screen) {
+        return SDL_SetError("OS3: OpenScreenTags failed for %dx%dx%d",
+                            w, h, depth);
+    }
+
+    iwin = OpenWindowTags(NULL,
+        WA_Left,          0,
+        WA_Top,           0,
+        WA_Width,         (ULONG)screen->Width,
+        WA_Height,        (ULONG)screen->Height,
+        WA_Flags,         (ULONG)OS3_WFLG_FULLSCREEN,
+        WA_IDCMP,         (ULONG)OS3_IDCMP_FULLSCREEN,
+        WA_CustomScreen,  (ULONG)screen,
+        TAG_DONE
+    );
+    if (!iwin) {
+        CloseScreen(screen);
+        return SDL_SetError("OS3: OpenWindowTags failed");
+    }
+
+    data->window        = iwin;
+    data->screen        = screen;
+    data->is_fullscreen = 1;
+
+    /* Hide the Intuition pointer in fullscreen to prevent flicker.
+     * Sprite data must be in CHIP RAM (ADCD pitfall). */
+    {
+        UWORD *empty_ptr = (UWORD *)AllocMem(6 * sizeof(UWORD),
+                                              MEMF_CHIP | MEMF_CLEAR);
+        if (empty_ptr) {
+            SetPointer(iwin, empty_ptr, 1, 1, 0, 0);
+            screen->UserData = (APTR)empty_ptr;
+        }
+    }
+
+    return 0;
+}
+
+/* --- Internal: find RTG mode and open fullscreen --- */
+static int OS3_OpenFullscreen(OS3_WindowData *data, int w, int h)
+{
+    ULONG modeid;
+
+    if (!CyberGfxBase) {
+        /* AGA path: use BestModeID for native mode selection */
+        modeid = BestModeID(
+            BIDTAG_NominalWidth,  (ULONG)w,
+            BIDTAG_NominalHeight, (ULONG)h,
+            BIDTAG_Depth,         8UL,
+            TAG_DONE
+        );
+        if (modeid == INVALID_ID) {
+            return SDL_SetError("OS3: no AGA mode found for %dx%d", w, h);
+        }
+        return OS3_OpenScreen(data, w, h, modeid, 8);
+    }
+
+    /* RTG path: BestCModeIDTags for CyberGraphX mode */
+    if (w < 640) w = 640;
+    if (h < 480) h = 480;
+
+    modeid = BestCModeIDTags(
+        CYBRBIDTG_NominalWidth,  w,
+        CYBRBIDTG_NominalHeight, h,
+        CYBRBIDTG_Depth,         32,
+        TAG_DONE
+    );
+    if (modeid == INVALID_ID) {
+        modeid = BestCModeIDTags(
+            CYBRBIDTG_NominalWidth,  640,
+            CYBRBIDTG_NominalHeight, 480,
+            CYBRBIDTG_Depth,         16,
+            TAG_DONE
+        );
+    }
+    if (modeid == INVALID_ID) {
+        /* P96/SAGA fallback: BestCModeIDTags may fail without
+           cybergraphics.library. Walk modes manually. */
+        modeid = OS3_FindRTGMode(w, h, 16);
+    }
+    if (modeid == INVALID_ID) {
+        return SDL_SetError("OS3: no suitable RTG fullscreen mode found");
+    }
+
+    return OS3_OpenScreen(data, w, h, modeid, 32);
+}
+
+/* --- Internal: open a windowed window on WB or custom screen --- */
+static int OS3_OpenWindowed(OS3_WindowData *data, SDL_Window *window)
+{
+    struct Window *iwin;
+    int use_wb = 0;
+    int xpos, ypos;
+
+    if (!CyberGfxBase) {
+        /* AGA: always open a custom fullscreen screen.
+         * No windowed mode on AGA (no chunky WB screen to open on). */
+        return OS3_OpenFullscreen(data, window->w, window->h);
+    }
+
+    /* RTG path: check if Workbench is suitable */
+    {
+        struct Screen *wbscreen = LockPubScreen(NULL);
+        if (wbscreen) {
+            struct BitMap *bm = wbscreen->RastPort.BitMap;
+            ULONG is_cyber = GetCyberMapAttr(bm, CYBRMATTR_ISCYBERGFX);
+            /* If GetCyberMapAttr fails (P96 without CGX), check if WB
+               screen depth >= 15 as a proxy for RTG */
+            if (!is_cyber && GetBitMapAttr(bm, BMA_DEPTH) >= 15) {
+                is_cyber = 1;
+            }
+            if (is_cyber && window->w <= (int)wbscreen->Width &&
+                window->h <= (int)wbscreen->Height) {
+                use_wb = 1;
+            }
+            UnlockPubScreen(NULL, wbscreen);
+        }
+    }
+
+    if (use_wb) {
+        xpos = (window->x == SDL_WINDOWPOS_CENTERED ||
+                window->x == SDL_WINDOWPOS_UNDEFINED) ? 32 : window->x;
+        ypos = (window->y == SDL_WINDOWPOS_CENTERED ||
+                window->y == SDL_WINDOWPOS_UNDEFINED) ? 32 : window->y;
+
+        iwin = OpenWindowTags(NULL,
+            WA_Left,          (ULONG)xpos,
+            WA_Top,           (ULONG)ypos,
+            WA_InnerWidth,    (ULONG)window->w,
+            WA_InnerHeight,   (ULONG)window->h,
+            WA_Flags,         (ULONG)OS3_WFLG_WINDOWED,
+            WA_IDCMP,         (ULONG)OS3_IDCMP_WINDOWED,
+            WA_PubScreen,     (ULONG)NULL,
+            WA_GimmeZeroZero, TRUE,
+            WA_Title,         (ULONG)(window->title ? window->title : "SDL"),
+            TAG_DONE
+        );
+        if (!iwin) {
+            return SDL_SetError("OS3: OpenWindowTags (WB) failed");
+        }
+        data->window        = iwin;
+        data->screen        = NULL;
+        data->is_fullscreen = 0;
+    } else {
+        /* Open our own RTG screen + window.
+         * PERF FIX (PDR-015 OpenTTD): use EXACT requested size for the screen
+         * instead of +64 padding. The padding caused BestCModeIDTags to pick
+         * the next-bigger Picasso96 mode (640+64=704 -> 800x600) which made
+         * window->Width != surface->w, forcing UpdateWindowFramebuffer down
+         * the BitMapScale path instead of the LockBitMap fast-path memcpy.
+         * For OpenTTD this was ~30 ms / frame extra. Real fix is to use the
+         * exact size and let the LockBitMap branch fire. */
+        ULONG modeid;
+        int scrw = window->w;
+        int scrh = window->h;
+
+        modeid = BestCModeIDTags(
+            CYBRBIDTG_NominalWidth,  scrw,
+            CYBRBIDTG_NominalHeight, scrh,
+            CYBRBIDTG_Depth,         32,
+            TAG_DONE
+        );
+        if (modeid == INVALID_ID) {
+            modeid = BestCModeIDTags(
+                CYBRBIDTG_NominalWidth,  640,
+                CYBRBIDTG_NominalHeight, 480,
+                CYBRBIDTG_Depth,         16,
+                TAG_DONE
+            );
+        }
+        if (modeid == INVALID_ID) {
+            /* P96/SAGA fallback */
+            modeid = OS3_FindRTGMode(scrw, scrh, 16);
+        }
+        if (modeid == INVALID_ID) {
+            return SDL_SetError("OS3: no RTG mode found for windowed");
+        }
+
+        return OS3_OpenScreen(data, scrw, scrh, modeid, 32);
+    }
+    return 0;
+}
+
+int OS3_CreateWindow(_THIS, SDL_Window *window)
+{
+    OS3_WindowData *data;
+    int fullscreen;
+    int rc;
+
+    data = (OS3_WindowData *)SDL_calloc(1, sizeof(OS3_WindowData));
+    if (!data) {
         return SDL_OutOfMemory();
     }
 
-    d->sdlwin = window;
-    d->syswin = syswin;
-    d->screen = syswin ? syswin->WScreen : NULL;
-    window->internal = d;
-    return true;
-}
+    fullscreen = (window->flags & SDL_WINDOW_FULLSCREEN) ? 1 : 0;
 
-static struct Window *OS3_OpenSystemWindow(SDL_VideoDevice *_this,
-                                           SDL_Window *window,
-                                           struct Screen *screen,
-                                           bool fullscreen)
-{
-    struct Window *w;
-
-    if (!screen) {
-        SDL_SetError("AmigaOS3: no screen available");
-        return NULL;
+    /* MiniGL currently creates/owns its native Intuition window when the
+     * GL context is created. For SDL_WINDOW_OPENGL only allocate driverdata
+     * here; OS3_GL_CreateContext() fills data->window via mglGetWindowHandle(). */
+    if (window->flags & SDL_WINDOW_OPENGL) {
+        data->is_opengl = 1;
+        data->is_fullscreen = fullscreen;
+        window->driverdata = data;
+        return 0;
     }
 
     if (fullscreen) {
-        w = OpenWindowTags(NULL,
-            WA_CustomScreen, screen,
-            WA_Left, 0,
-            WA_Top, 0,
-            WA_Width, screen->Width,
-            WA_Height, screen->Height,
-            WA_Title, window->title ? window->title : "SDL3",
-            WA_IDCMP, OS3_IDCMP_FULLSCREEN,
-            WA_Borderless, TRUE,
-            WA_Backdrop, TRUE,
-            WA_Activate, TRUE,
-            WA_RMBTrap, TRUE,
-            WA_ReportMouse, TRUE,
-            WA_SimpleRefresh, TRUE,
-            TAG_DONE);
+        rc = OS3_OpenFullscreen(data, window->w, window->h);
     } else {
-        SDL_VideoData *vd = (SDL_VideoData *)_this->internal;
-        int inner_w = window->windowed.w > 0 ? window->windowed.w : window->w;
-        int inner_h = window->windowed.h > 0 ? window->windowed.h : window->h;
-        int left = window->windowed.x;
-        int top = window->windowed.y;
-        int max_inner_w;
-        int max_inner_h;
-
-        if (!vd || !vd->publicScreen) {
-            SDL_SetError("AmigaOS3: no public screen available");
-            return NULL;
-        }
-
-        max_inner_w = (int)screen->Width -
-                      (int)screen->WBorLeft -
-                      (int)screen->WBorRight;
-        max_inner_h = (int)screen->Height -
-                      (int)screen->WBorTop -
-                      (int)screen->WBorBottom -
-                      (int)screen->Font->ta_YSize - 1;
-        if (max_inner_w < 64) max_inner_w = 64;
-        if (max_inner_h < 64) max_inner_h = 64;
-        if (inner_w > max_inner_w) inner_w = max_inner_w;
-        if (inner_h > max_inner_h) inner_h = max_inner_h;
-
-        if (left < 0 || left + inner_w > (int)screen->Width) left = 0;
-        if (top < 0 || top + inner_h > (int)screen->Height) top = 0;
-
-        w = OpenWindowTags(NULL,
-            WA_CustomScreen, screen,
-            WA_Left, left, WA_Top, top,
-            WA_InnerWidth, inner_w, WA_InnerHeight, inner_h,
-            WA_Title, window->title ? window->title : "SDL3",
-            WA_IDCMP, OS3_IDCMP_WINDOWED,
-            WA_Borderless, (window->flags & SDL_WINDOW_BORDERLESS) ? TRUE : FALSE,
-            WA_CloseGadget, (window->flags & SDL_WINDOW_BORDERLESS) ? FALSE : TRUE,
-            WA_DepthGadget, (window->flags & SDL_WINDOW_BORDERLESS) ? FALSE : TRUE,
-            WA_DragBar, (window->flags & SDL_WINDOW_BORDERLESS) ? FALSE : TRUE,
-            WA_SizeGadget, ((window->flags & SDL_WINDOW_RESIZABLE) &&
-                            !(window->flags & SDL_WINDOW_BORDERLESS)) ? TRUE : FALSE,
-            WA_Activate, TRUE,
-            WA_ReportMouse, TRUE,
-            WA_SimpleRefresh, TRUE,
-            WA_AutoAdjust, TRUE,
-            TAG_DONE);
+        rc = OS3_OpenWindowed(data, window);
     }
 
-    return w;
+    if (rc < 0) {
+        SDL_free(data);
+        return rc;
+    }
+
+    window->driverdata = data;
+    return 0;
 }
 
-bool OS3_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SDL_PropertiesID props)
+void OS3_SetWindowFullscreen(_THIS, SDL_Window *window,
+                             SDL_VideoDisplay *display, SDL_bool fullscreen)
 {
-    SDL_VideoData *vd = (SDL_VideoData *)_this->internal;
-    struct Window *w;
-    (void)props;
+    OS3_WindowData *data = (OS3_WindowData *)window->driverdata;
+    OS3_DisplayData *disp_data = display ? (OS3_DisplayData *)display->driverdata : NULL;
+    struct Window *iwin;
 
-    /*
-     * MiniGL owns its native Window. SDL only allocates per-window data here;
-     * OS3_GL_CreateContext() creates the Window later.
-     */
-    if (window->flags & SDL_WINDOW_OPENGL) {
-        return OS3_SetupData(window, NULL);
-    }
-
-    if (!vd || !vd->publicScreen) {
-        return SDL_SetError("AmigaOS3: no public screen available");
-    }
-
-    w = OS3_OpenSystemWindow(_this, window, vd->publicScreen, false);
-    if (!w) {
-        return false;
-    }
-
-    window->x = w->LeftEdge;
-    window->y = w->TopEdge;
-    window->w = w->GZZWidth;
-    window->h = w->GZZHeight;
-
-    return OS3_SetupData(window, w);
-}
-
-void OS3_DestroyWindow(SDL_VideoDevice *_this, SDL_Window *window)
-{
-    SDL_WindowData *d = window ? window->internal : NULL;
-    (void)_this;
-
-    if (!d) {
+    if (!data || window->is_destroying) {
         return;
     }
 
-    if (d->syswin && !d->minigl_owns_window) {
-        CloseWindow(d->syswin);
-    }
-
-    SDL_free(d);
-    window->internal = NULL;
-}
-
-
-static void OS3_ApplyWindowLimits(SDL_Window *window)
-{
-    SDL_WindowData *d = window ? window->internal : NULL;
-    int minw = 1, minh = 1, maxw = -1, maxh = -1;
-
-    if (!d || !d->syswin || d->minigl_owns_window) return;
-
-    if (window->min_w > 0) minw = window->min_w + d->syswin->BorderLeft + d->syswin->BorderRight;
-    if (window->min_h > 0) minh = window->min_h + d->syswin->BorderTop + d->syswin->BorderBottom;
-    if (window->max_w > 0) maxw = window->max_w + d->syswin->BorderLeft + d->syswin->BorderRight;
-    if (window->max_h > 0) maxh = window->max_h + d->syswin->BorderTop + d->syswin->BorderBottom;
-
-    WindowLimits(d->syswin, minw, minh, maxw, maxh);
-}
-
-bool OS3_SetWindowPosition(SDL_VideoDevice *_this, SDL_Window *window)
-{
-    SDL_WindowData *d = window ? window->internal : NULL;
-    (void)_this;
-    if (!d || !d->syswin) return false;
-    if (d->minigl_owns_window) return SDL_SetError("AmigaOS3: moving a MiniGL-owned window is unsupported");
-
-    MoveWindow(d->syswin,
-               window->pending.x - d->syswin->LeftEdge,
-               window->pending.y - d->syswin->TopEdge);
-    SDL_SendWindowEvent(window, SDL_EVENT_WINDOW_MOVED, d->syswin->LeftEdge, d->syswin->TopEdge);
-    return true;
-}
-
-void OS3_SetWindowSize(SDL_VideoDevice *_this, SDL_Window *window)
-{
-    SDL_WindowData *d = window ? window->internal : NULL;
-    int cw, ch;
-    (void)_this;
-    if (!d || !d->syswin) return;
-
-    if (d->minigl_owns_window) {
-#if !defined(SDL_AMIGAOS3_SW_ONLY)
-        if (d->gl_context) mglResizeContext(window->pending.w, window->pending.h);
+    /* MiniGL has no API yet to move an existing context between windowed
+     * and fullscreen native windows. Initial fullscreen is selected before
+     * mglCreateContext(); runtime toggles keep the existing native window. */
+    if (data->is_opengl) {
+        data->is_fullscreen = fullscreen ? 1 : 0;
+#if defined(SDL_VIDEO_OPENGL)
+        if (data->gl_context && data->window) {
+            int iw = data->window->Width - data->window->BorderLeft - data->window->BorderRight;
+            int ih = data->window->Height - data->window->BorderTop - data->window->BorderBottom;
+            if (iw > 0 && ih > 0) {
+                OS3_GL_ResizeWindow(_this, window, iw, ih);
+            }
+        }
 #endif
         return;
     }
 
-    cw = d->syswin->GZZWidth;
-    ch = d->syswin->GZZHeight;
-    SizeWindow(d->syswin, window->pending.w - cw, window->pending.h - ch);
-}
+    /* Destroy framebuffer -- it will be recreated on next
+     * UpdateWindowFramebuffer with the new window's RastPort */
+    OS3_DestroyWindowFramebuffer(_this, window);
 
-void OS3_SetWindowMinMaxSize(SDL_VideoDevice *_this, SDL_Window *window)
-{
-    (void)_this;
-    OS3_ApplyWindowLimits(window);
-}
-
-bool OS3_GetWindowBordersSize(SDL_VideoDevice *_this, SDL_Window *window,
-                              int *top, int *left, int *bottom, int *right)
-{
-    SDL_WindowData *d = window ? window->internal : NULL;
-    (void)_this;
-    if (!d || !d->syswin) return false;
-    if (top) *top = d->syswin->BorderTop;
-    if (left) *left = d->syswin->BorderLeft;
-    if (bottom) *bottom = d->syswin->BorderBottom;
-    if (right) *right = d->syswin->BorderRight;
-    return true;
-}
-
-void OS3_MaximizeWindow(SDL_VideoDevice *_this, SDL_Window *window)
-{
-    SDL_WindowData *d = window ? window->internal : NULL;
-    struct Screen *s;
-    int w, h;
-    (void)_this;
-    if (!d || !d->syswin || d->minigl_owns_window) return;
-    s = d->syswin->WScreen;
-    w = s->Width - d->syswin->BorderLeft - d->syswin->BorderRight;
-    h = s->Height - d->syswin->BorderTop - d->syswin->BorderBottom;
-    MoveWindow(d->syswin, -d->syswin->LeftEdge, -d->syswin->TopEdge);
-    SizeWindow(d->syswin, w - d->syswin->GZZWidth, h - d->syswin->GZZHeight);
-    SDL_SendWindowEvent(window, SDL_EVENT_WINDOW_MAXIMIZED, 0, 0);
-}
-
-void OS3_MinimizeWindow(SDL_VideoDevice *_this, SDL_Window *window)
-{
-    SDL_WindowData *d = window ? window->internal : NULL;
-    (void)_this;
-    if (!d || !d->syswin) return;
-
-    /* Classic Intuition has no generic hide/iconify call without Workbench
-       AppIcon plumbing. WindowToBack is the safe native approximation. */
-    WindowToBack(d->syswin);
-    SDL_SendWindowEvent(window, SDL_EVENT_WINDOW_MINIMIZED, 0, 0);
-}
-
-void OS3_RestoreWindow(SDL_VideoDevice *_this, SDL_Window *window)
-{
-    SDL_WindowData *d = window ? window->internal : NULL;
-    (void)_this;
-    if (!d || !d->syswin) return;
-
-    if ((window->flags & SDL_WINDOW_MAXIMIZED) && !d->minigl_owns_window) {
-        MoveWindow(d->syswin,
-                   window->floating.x - d->syswin->LeftEdge,
-                   window->floating.y - d->syswin->TopEdge);
-        SizeWindow(d->syswin,
-                   window->floating.w - d->syswin->GZZWidth,
-                   window->floating.h - d->syswin->GZZHeight);
+    /* Close existing window (but NOT the display's fullscreen screen --
+     * that's managed by SetDisplayMode) */
+    if (data->window) {
+        ClearPointer(data->window);
+        CloseWindow(data->window);
+        data->window = NULL;
     }
+    /* Close any screen WE own (from windowed custom screen path) */
+    if (data->screen && (!disp_data || data->screen != disp_data->fullscreen_screen)) {
+        if (data->screen->UserData) {
+            FreeMem(data->screen->UserData, 6 * sizeof(UWORD));
+            data->screen->UserData = NULL;
+        }
+        CloseScreen(data->screen);
+    }
+    data->screen = NULL;
+    data->is_fullscreen = 0;
 
-    WindowToFront(d->syswin);
-    ActivateWindow(d->syswin);
-    SDL_SendWindowEvent(window, SDL_EVENT_WINDOW_RESTORED, 0, 0);
+    if (fullscreen && disp_data && disp_data->fullscreen_screen) {
+        /* SetDisplayMode already opened a screen at the right resolution.
+         * Open a borderless window filling that screen. */
+        struct Screen *screen = disp_data->fullscreen_screen;
+
+        iwin = OpenWindowTags(NULL,
+            WA_Left,          0,
+            WA_Top,           0,
+            WA_Width,         (ULONG)screen->Width,
+            WA_Height,        (ULONG)screen->Height,
+            WA_Flags,         (ULONG)OS3_WFLG_FULLSCREEN,
+            WA_IDCMP,         (ULONG)OS3_IDCMP_FULLSCREEN,
+            WA_CustomScreen,  (ULONG)screen,
+            TAG_DONE
+        );
+        if (iwin) {
+            UWORD *empty_ptr;
+            data->window = iwin;
+            data->screen = screen;
+            data->is_fullscreen = 1;
+
+            /* Hide pointer in fullscreen (same reason as OS3_OpenFullscreen) */
+            empty_ptr = (UWORD *)AllocMem(6 * sizeof(UWORD), MEMF_CHIP | MEMF_CLEAR);
+            if (empty_ptr) {
+                SetPointer(iwin, empty_ptr, 1, 1, 0, 0);
+                screen->UserData = (APTR)empty_ptr;
+            }
+
+            /* Do NOT send SDL_WINDOWEVENT_RESIZED to screen size.
+             * Keep SDL window at the game's logical size (e.g. 320x200).
+             * The framebuffer stays small and ScalePixelArray in
+             * UpdateWindowFramebuffer handles upscaling to the
+             * actual Intuition window/screen size. */
+        } else {
+            /* Fallback to windowed */
+            OS3_OpenWindowed(data, window);
+        }
+    } else if (fullscreen) {
+        /* No display screen available -- use our own fullscreen */
+        OS3_OpenFullscreen(data, window->w, window->h);
+    } else {
+        /* Leaving fullscreen -- reopen windowed */
+        OS3_OpenWindowed(data, window);
+    }
 }
 
-static void OS3_RecreateWindow(SDL_VideoDevice *_this, SDL_Window *window)
+void OS3_DestroyWindow(_THIS, SDL_Window *window)
 {
-    SDL_WindowData *d = window ? window->internal : NULL;
-    SDL_VideoData *vd = (SDL_VideoData *)_this->internal;
-    struct Window *nw;
+    OS3_WindowData *data = (OS3_WindowData *)window->driverdata;
 
-    if (!d || !d->syswin || d->minigl_owns_window || (window->flags & SDL_WINDOW_FULLSCREEN)) {
+    if (!data) {
         return;
     }
 
-    if (window->surface) SDL_DestroyWindowSurface(window);
-    CloseWindow(d->syswin);
-    d->syswin = NULL;
+    /* Destroy framebuffer surface first */
+    OS3_DestroyWindowFramebuffer(_this, window);
 
-    nw = OS3_OpenSystemWindow(_this, window, vd->publicScreen, false);
-    if (nw) {
-        d->syswin = nw;
-        d->screen = nw->WScreen;
-        OS3_ApplyWindowLimits(window);
-    }
-}
-
-void OS3_SetWindowBordered(SDL_VideoDevice *_this, SDL_Window *window, bool bordered)
-{
-    (void)bordered;
-    OS3_RecreateWindow(_this, window);
-}
-
-void OS3_SetWindowResizable(SDL_VideoDevice *_this, SDL_Window *window, bool resizable)
-{
-    (void)resizable;
-    OS3_RecreateWindow(_this, window);
-}
-
-void OS3_SetWindowAlwaysOnTop(SDL_VideoDevice *_this, SDL_Window *window, bool on_top)
-{
-    SDL_WindowData *d = window ? window->internal : NULL;
-    (void)_this;
-    if (d && d->syswin && on_top) WindowToFront(d->syswin);
-}
-
-bool OS3_SetWindowMouseGrab(SDL_VideoDevice *_this, SDL_Window *window, bool grabbed)
-{
-    SDL_WindowData *d = window ? window->internal : NULL;
-    (void)_this;
-    if (!d || !d->syswin) return false;
-
-    /*
-     * Classic Intuition has no universal pointer confinement API.
-     * RMBTrap + focus retention are still useful to games; true confinement
-     * can be layered on input.device later.
-     */
-    if (grabbed) {
-        d->syswin->Flags |= WFLG_RMBTRAP;
-        ActivateWindow(d->syswin);
+    if (data->minigl_owns_window) {
+        /* MiniGL destroys the native Window with its context. Never call
+         * CloseWindow() on it from the SDL window backend. */
+        data->window = NULL;
+        data->screen = NULL;
     } else {
-        d->syswin->Flags &= ~WFLG_RMBTRAP;
+        /* Close window before screen -- mandatory order per ADCD */
+        OS3_CloseWindowAndScreen(data);
     }
-    return true;
+
+    SDL_free(data);
+    window->driverdata = NULL;
 }
 
-bool OS3_SetWindowKeyboardGrab(SDL_VideoDevice *_this, SDL_Window *window, bool grabbed)
+void OS3_SetWindowTitle(_THIS, SDL_Window *window)
 {
-    SDL_WindowData *d = window ? window->internal : NULL;
-    (void)_this;
-    if (!d || !d->syswin) return false;
-    if (grabbed) ActivateWindow(d->syswin);
-    return true;
+    OS3_WindowData *data = (OS3_WindowData *)window->driverdata;
+
+    if (!data || !data->window) {
+        return;
+    }
+
+    /* SetWindowTitles: NULL means "do not change". Pass ~0 for icon title. */
+    SetWindowTitles(data->window,
+                    (CONST_STRPTR)(window->title ? window->title : ""),
+                    (CONST_STRPTR)~0UL);   /* ~0 = leave icon title unchanged */
 }
 
-SDL_FullscreenResult OS3_SetWindowFullscreen(SDL_VideoDevice *_this,
-                                              SDL_Window *window,
-                                              SDL_VideoDisplay *display,
-                                              SDL_FullscreenOp op)
+void OS3_ShowWindow(_THIS, SDL_Window *window)
 {
-    SDL_WindowData *d = window ? window->internal : NULL;
-    SDL_VideoData *vd = (SDL_VideoData *)_this->internal;
-    struct Window *w = NULL;
-    struct Screen *screen = NULL;
-
-    if (!d || !display) {
-        SDL_SetError("AmigaOS3: invalid fullscreen transition");
-        return SDL_FULLSCREEN_FAILED;
-    }
-
-    /*
-     * MiniGL creates and owns both the GL window and fullscreen screen.
-     * A GL window that has not got a context yet can safely enter/leave here;
-     * OS3_GL_CreateContext() will inspect SDL_WINDOW_FULLSCREEN afterwards.
-     * Recreating a live MiniGL context behind SDL's back would invalidate the
-     * user's GL context, so don't do that.
-     */
-    if (window->flags & SDL_WINDOW_OPENGL) {
-        if (d->gl_context) {
-            if ((op == SDL_FULLSCREEN_OP_ENTER && !(window->flags & SDL_WINDOW_FULLSCREEN)) ||
-                (op == SDL_FULLSCREEN_OP_LEAVE && (window->flags & SDL_WINDOW_FULLSCREEN))) {
-                SDL_SetError("AmigaOS3: live MiniGL fullscreen transitions are not supported yet");
-                return SDL_FULLSCREEN_FAILED;
-            }
-        }
-        return SDL_FULLSCREEN_SUCCEEDED;
-    }
-
-    /* Any SDL window surface points at the old native window. */
-    if (window->surface) {
-        SDL_DestroyWindowSurface(window);
-    }
-
-    if (d->syswin) {
-        CloseWindow(d->syswin);
-        d->syswin = NULL;
-        d->screen = NULL;
-    }
-
-    if (op == SDL_FULLSCREEN_OP_ENTER || op == SDL_FULLSCREEN_OP_UPDATE) {
-        screen = OS3_OpenFullscreenScreen(_this, display);
-        if (!screen) {
-            return SDL_FULLSCREEN_FAILED;
-        }
-
-        w = OS3_OpenSystemWindow(_this, window, screen, true);
-        if (!w) {
-            OS3_CloseFullscreenScreen(_this, display);
-            return SDL_FULLSCREEN_FAILED;
-        }
-
-        d->syswin = w;
-        d->screen = screen;
-        d->owns_screen = false; /* screen is owned by SDL_DisplayData */
-        window->x = 0;
-        window->y = 0;
-        window->w = w->Width;
-        window->h = w->Height;
-        return SDL_FULLSCREEN_SUCCEEDED;
-    }
-
-    /* Leave fullscreen: native fullscreen window is gone, so Screen can close. */
-    OS3_CloseFullscreenScreen(_this, display);
-
-    if (!vd || !vd->publicScreen) {
-        SDL_SetError("AmigaOS3: public screen unavailable while leaving fullscreen");
-        return SDL_FULLSCREEN_FAILED;
-    }
-
-    w = OS3_OpenSystemWindow(_this, window, vd->publicScreen, false);
-    if (!w) {
-        return SDL_FULLSCREEN_FAILED;
-    }
-
-    d->syswin = w;
-    d->screen = vd->publicScreen;
-    window->x = w->LeftEdge;
-    window->y = w->TopEdge;
-    window->w = w->GZZWidth;
-    window->h = w->GZZHeight;
-
-    return SDL_FULLSCREEN_SUCCEEDED;
-}
-
-void OS3_SetWindowTitle(SDL_VideoDevice *_this, SDL_Window *window)
-{
-    SDL_WindowData *d = window->internal;
-    (void)_this;
-    if (d && d->syswin) {
-        SetWindowTitles(d->syswin, (STRPTR)(window->title ? window->title : "SDL3"), (STRPTR)-1);
-    }
-}
-
-void OS3_ShowWindow(SDL_VideoDevice *_this, SDL_Window *window)
-{
-    SDL_WindowData *d = window->internal;
-    (void)_this;
-    if (d && d->syswin) {
-        WindowToFront(d->syswin);
-        ActivateWindow(d->syswin);
-    }
-}
-
-void OS3_HideWindow(SDL_VideoDevice *_this, SDL_Window *window)
-{
-    (void)_this;
+    /* Intuition windows are visible as soon as they are opened.
+       Nothing to do for Phase 1. */
     (void)window;
 }
 
-void OS3_RaiseWindow(SDL_VideoDevice *_this, SDL_Window *window)
+void OS3_HideWindow(_THIS, SDL_Window *window)
 {
-    OS3_ShowWindow(_this, window);
+    /* No iconification API in bare Intuition without workbench.library.
+       Phase 1: no-op. */
+    (void)window;
 }
 
-#endif
+void OS3_RaiseWindow(_THIS, SDL_Window *window)
+{
+    OS3_WindowData *data = (OS3_WindowData *)window->driverdata;
+
+    if (!data || !data->window) {
+        return;
+    }
+
+    WindowToFront(data->window);
+    ActivateWindow(data->window);
+}
+
+#endif /* SDL_VIDEO_DRIVER_AMIGAOS3 */
