@@ -178,7 +178,9 @@
 /* --- VIDEO DRIVERS --- */
 #define SDL_VIDEO_DRIVER_AMIGAOS3   1
 #if !defined(WARPUP)
+#if !defined(SDL_AMIGAOS3_SW_ONLY)
 #define SDL_VIDEO_OPENGL            1   /* minigl.library backend (68k) */
+#endif
 #endif
 #define SDL_VIDEO_DRIVER_DUMMY      1   /* fallback */
 
