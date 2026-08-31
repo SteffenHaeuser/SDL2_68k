@@ -1,0 +1,15 @@
+# Convenience wrapper for SDL2 AmigaOS3 software-only builds.
+
+.PHONY: all clib2 libnix clean
+
+all: clib2 libnix
+
+clib2:
+	$(MAKE) -f Makefile.soft
+
+libnix:
+	$(MAKE) -f Makefile.soft.libnix
+
+clean:
+	$(MAKE) -f Makefile.soft clean
+	$(MAKE) -f Makefile.soft.libnix clean
