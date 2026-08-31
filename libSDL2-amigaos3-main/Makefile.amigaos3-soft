@@ -1,0 +1,125 @@
+# SDL3 AmigaOS3 -- software-only classic Makefile
+#
+# No MiniGL/PiStorm3D SDK is required.
+#
+#   make -f Makefile.amigaos3-soft clib2
+#   make -f Makefile.amigaos3-soft libnix
+#   make -f Makefile.amigaos3-soft both
+#   make -f Makefile.amigaos3-soft math-both
+
+CC=m68k-amigaos-gcc
+AR=m68k-amigaos-ar
+
+COMMON=-std=gnu99 -O2 -mcpu=68040 -mhard-float \
+	-I./include -I./include/build_config -I./include/SDL3 \
+	-D__AMIGAOS3__ -DSDL_AMIGAOS3_SW_ONLY=1
+
+CLIB2=$(COMMON) -mcrt=clib2 -DNOIXEMUL
+LIBNIX=$(COMMON) -noixemul -DNOIXEMUL
+
+SOURCES_ALL=$(wildcard \
+	./src/*.c \
+	./src/atomic/*.c \
+	./src/audio/*.c ./src/audio/amigaos3/*.c \
+	./src/camera/*.c ./src/camera/dummy/*.c \
+	./src/cpuinfo/*.c \
+	./src/dialog/*.c ./src/dialog/amigaos3/*.c \
+	./src/events/*.c \
+	./src/gpu/SDL_gpu.c \
+	./src/haptic/*.c \
+	./src/io/*.c ./src/io/generic/SDL_asyncio_generic.c \
+	./src/joystick/*.c ./src/joystick/amigaos3/*.c \
+	./src/libm/*.c \
+	./src/loadso/dummy/*.c \
+	./src/locale/*.c ./src/locale/amigaos3/*.c \
+	./src/main/generic/*.c ./src/main/SDL_main_callbacks.c ./src/main/SDL_runapp.c \
+	./src/misc/*.c \
+	./src/power/*.c \
+	./src/process/*.c ./src/process/dummy/*.c \
+	./src/render/*.c ./src/render/software/*.c \
+	./src/sensor/*.c ./src/sensor/dummy/*.c \
+	./src/stdlib/*.c \
+	./src/storage/SDL_storage.c ./src/storage/generic/SDL_genericstorage.c \
+	./src/thread/*.c ./src/thread/amigaos3/*.c \
+	./src/thread/generic/SDL_syscond.c ./src/thread/generic/SDL_sysrwlock.c \
+	./src/time/SDL_time.c ./src/time/amigaos3/SDL_systime.c \
+	./src/timer/*.c ./src/timer/amigaos3/*.c \
+	./src/tray/SDL_tray_utils.c ./src/tray/dummy/*.c \
+	./src/video/*.c ./src/video/yuv2rgb/yuv_rgb_std.c \
+	./src/video/amigaos3/*.c ./src/video/dummy/*.c \
+	./src/filesystem/SDL_filesystem.c ./src/filesystem/amigaos3/*.c)
+
+SOURCES=$(filter-out ./src/video/amigaos3/SDL_os3opengl.c,$(SOURCES_ALL))
+
+REL=$(patsubst ./%,%,$(SOURCES:.c=.o))
+CLOBJ=$(addprefix build/clib2-soft/,$(REL))
+LNOBJ=$(addprefix build/libnix-soft/,$(REL))
+
+TESTLIB_SOURCES=$(wildcard ./src/test/*.c)
+TESTLIB_REL=$(patsubst ./%,%,$(TESTLIB_SOURCES:.c=.o))
+TESTLIB_CLOBJ=$(addprefix build/clib2-soft/,$(TESTLIB_REL))
+TESTLIB_LNOBJ=$(addprefix build/libnix-soft/,$(TESTLIB_REL))
+
+TEST_LIBS=-ldebug -lamiga -lm -latomic -lstubs
+
+.PHONY: all clib2 libnix both clean \
+	test-sw-clib2 test-sw-libnix \
+	math-clib2 math-libnix math-both
+
+all: clib2
+
+clib2: build/clib2-soft/libSDL3.a build/clib2-soft/libSDL3_test.a
+
+libnix: build/libnix-soft/libSDL3.a build/libnix-soft/libSDL3_test.a
+
+both: clib2 libnix
+
+build/clib2-soft/libSDL3.a: $(CLOBJ)
+	@mkdir -p $(@D)
+	$(AR) rcs $@ $(CLOBJ)
+
+build/libnix-soft/libSDL3.a: $(LNOBJ)
+	@mkdir -p $(@D)
+	$(AR) rcs $@ $(LNOBJ)
+
+build/clib2-soft/libSDL3_test.a: $(TESTLIB_CLOBJ)
+	@mkdir -p $(@D)
+	$(AR) rcs $@ $(TESTLIB_CLOBJ)
+
+build/libnix-soft/libSDL3_test.a: $(TESTLIB_LNOBJ)
+	@mkdir -p $(@D)
+	$(AR) rcs $@ $(TESTLIB_LNOBJ)
+
+build/clib2-soft/%.o: %.c
+	@mkdir -p $(@D)
+	$(CC) $(CLIB2) -c $< -o $@
+
+build/libnix-soft/%.o: %.c
+	@mkdir -p $(@D)
+	$(CC) $(LIBNIX) -c $< -o $@
+
+build/clib2-soft/examples/test_sw: examples/amigaos3/test_sw.c build/clib2-soft/libSDL3.a
+	@mkdir -p $(@D)
+	$(CC) $(CLIB2) $< build/clib2-soft/libSDL3.a $(TEST_LIBS) -o $@
+
+build/libnix-soft/examples/test_sw: examples/amigaos3/test_sw.c build/libnix-soft/libSDL3.a
+	@mkdir -p $(@D)
+	$(CC) $(LIBNIX) $< build/libnix-soft/libSDL3.a $(TEST_LIBS) -o $@
+
+test-sw-clib2: build/clib2-soft/examples/test_sw
+test-sw-libnix: build/libnix-soft/examples/test_sw
+
+build/clib2-soft/examples/test_math: examples/amigaos3/test_math.c build/clib2-soft/libSDL3.a
+	@mkdir -p $(@D)
+	$(CC) $(CLIB2) $< build/clib2-soft/libSDL3.a $(TEST_LIBS) -o $@
+
+build/libnix-soft/examples/test_math: examples/amigaos3/test_math.c build/libnix-soft/libSDL3.a
+	@mkdir -p $(@D)
+	$(CC) $(LIBNIX) $< build/libnix-soft/libSDL3.a $(TEST_LIBS) -o $@
+
+math-clib2: clib2 build/clib2-soft/examples/test_math
+math-libnix: libnix build/libnix-soft/examples/test_math
+math-both: math-clib2 math-libnix
+
+clean:
+	rm -rf build/clib2-soft build/libnix-soft
