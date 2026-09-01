@@ -1,10 +1,8 @@
 /*
   SDL2 OpenGL backend -- AmigaOS 3.x minigl.library
 
-  The current MiniGL API creates and owns the native Intuition Window as part
-  of mglCreateContext(). SDL therefore allocates its SDL_Window first, and this
-  backend attaches the MiniGL-created Window to OS3_WindowData after context
-  creation. No MiniGL API extension is required.
+  SDL creates and owns the native Intuition Window. MiniGL attaches a GL
+  context to that existing Window through mglCreateContextFromWindow().
 */
 
 #include "../../SDL_internal.h"
@@ -66,7 +64,6 @@ SDL_GLContext OS3_GL_CreateContext(_THIS, SDL_Window *window)
 {
     OS3_WindowData *data;
     SDL_GLContext context;
-    struct Window *iwin;
     int depth = 32;
 
     if (!window || !window->driverdata) {
@@ -75,6 +72,10 @@ SDL_GLContext OS3_GL_CreateContext(_THIS, SDL_Window *window)
     }
 
     data = (OS3_WindowData *)window->driverdata;
+    if (!data->window) {
+        SDL_SetError("OS3: SDL window has no Intuition window");
+        return NULL;
+    }
     if (data->gl_context) {
         SDL_SetError("OS3: this SDL window already has a MiniGL context");
         return NULL;
@@ -96,34 +97,16 @@ SDL_GLContext OS3_GL_CreateContext(_THIS, SDL_Window *window)
 
     mglChoosePixelDepth(depth);
     mglChooseNumberOfBuffers(_this->gl_config.double_buffer ? 2 : 1);
-    mglChooseWindowMode((window->flags & SDL_WINDOW_FULLSCREEN) ? GL_FALSE : GL_TRUE);
 
-    context = (SDL_GLContext)mglCreateContext(0, 0, window->w, window->h);
+    context = (SDL_GLContext)mglCreateContextFromWindow((void *)data->window);
     if (!context) {
-        SDL_SetError("OS3: mglCreateContext(%d,%d) failed", window->w, window->h);
+        SDL_SetError("OS3: mglCreateContextFromWindow() failed");
         return NULL;
     }
 
-    iwin = (struct Window *)mglGetWindowHandle();
-    if (!iwin) {
-        mglDeleteContext();
-        SDL_SetError("OS3: MiniGL context returned no Intuition window");
-        return NULL;
-    }
-
-    data->window = iwin;
-    data->screen = iwin->WScreen;
     data->is_opengl = 1;
-    data->minigl_owns_window = 1;
     data->gl_context = context;
     data->is_fullscreen = (window->flags & SDL_WINDOW_FULLSCREEN) ? 1 : 0;
-
-    /* SDL owns event translation. Subscribe the MiniGL Window to the same
-     * IDCMP classes used by the normal AmigaOS3 SDL window backend. */
-    ModifyIDCMP(iwin, data->is_fullscreen ? OS3_IDCMP_FULLSCREEN : OS3_IDCMP_WINDOWED);
-    SetWindowTitles(iwin,
-                    (CONST_STRPTR)(window->title ? window->title : "SDL"),
-                    (CONST_STRPTR)~0UL);
 
     OS3_GL_SelectContext(context);
     return context;
@@ -227,14 +210,12 @@ void OS3_GL_DeleteContext(_THIS, SDL_GLContext context)
         return;
     }
 
-    /* Clear the association before MiniGL destroys its native window. */
+    /* MiniGL only borrows the Intuition Window. Clear the GL association,
+     * but leave data->window/data->screen intact for SDL to destroy. */
     for (window = _this->windows; window; window = window->next) {
         OS3_WindowData *data = (OS3_WindowData *)window->driverdata;
         if (data && data->gl_context == context) {
             data->gl_context = NULL;
-            data->window = NULL;
-            data->screen = NULL;
-            data->minigl_owns_window = 0;
             break;
         }
     }

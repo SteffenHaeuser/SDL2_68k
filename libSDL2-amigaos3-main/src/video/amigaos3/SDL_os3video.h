@@ -49,7 +49,6 @@ typedef struct OS3_WindowData {
     struct Screen *screen;    /* Intuition screen (NULL if using WB screen) */
     int            is_fullscreen; /* non-zero if we own the screen */
     int            is_opengl;     /* SDL_WINDOW_OPENGL window */
-    int            minigl_owns_window; /* native Window is owned by MiniGL context */
     void          *gl_context;    /* MiniGL context associated with this SDL window */
     /* AGA palette shadow for dirty detection (used when CyberGfxBase == NULL) */
     SDL_Color      aga_palette[256];
