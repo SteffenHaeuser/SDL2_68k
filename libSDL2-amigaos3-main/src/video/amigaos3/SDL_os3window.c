@@ -330,10 +330,14 @@ int OS3_CreateWindow(_THIS, SDL_Window *window)
 
     fullscreen = (window->flags & SDL_WINDOW_FULLSCREEN) ? 1 : 0;
 
-    /* SDL always creates and owns the native Intuition Window. OpenGL
-     * contexts borrow this Window through mglCreateContextFromWindow(). */
+    /* MiniGL currently creates/owns its native Intuition window when the
+     * GL context is created. For SDL_WINDOW_OPENGL only allocate driverdata
+     * here; OS3_GL_CreateContext() fills data->window via mglGetWindowHandle(). */
     if (window->flags & SDL_WINDOW_OPENGL) {
         data->is_opengl = 1;
+        data->is_fullscreen = fullscreen;
+        window->driverdata = data;
+        return 0;
     }
 
     if (fullscreen) {
@@ -458,9 +462,15 @@ void OS3_DestroyWindow(_THIS, SDL_Window *window)
     /* Destroy framebuffer surface first */
     OS3_DestroyWindowFramebuffer(_this, window);
 
-    /* SDL owns the native Window even for OpenGL contexts. Close window
-     * before screen -- mandatory order per ADCD. */
-    OS3_CloseWindowAndScreen(data);
+    if (data->minigl_owns_window) {
+        /* MiniGL destroys the native Window with its context. Never call
+         * CloseWindow() on it from the SDL window backend. */
+        data->window = NULL;
+        data->screen = NULL;
+    } else {
+        /* Close window before screen -- mandatory order per ADCD */
+        OS3_CloseWindowAndScreen(data);
+    }
 
     SDL_free(data);
     window->driverdata = NULL;
