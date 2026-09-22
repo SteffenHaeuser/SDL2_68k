@@ -367,7 +367,7 @@ static int OS3_ShowCursor(SDL_Cursor *cursor)
         return 0;
     }
     wdata = (OS3_WindowData *)sdl_window->driverdata;
-    if (!wdata || !wdata->window) {
+    if (!wdata || !wdata->window || wdata->external_window) {
         return 0;
     }
     iwin = wdata->window;

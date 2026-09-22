@@ -415,3 +415,10 @@ native-gl-example: $(TARGET)
 	$(CC) $(CFLAGS) -o $(EXAMPLE_DIR)/test_gl_minigl examples/test_gl_minigl.c \
 		-L$(BUILD_DIR) -lSDL2 -lminigl -ldebug -lamiga -lm -lstubs
 	@echo "Built $(EXAMPLE_DIR)/test_gl_minigl (SDL2 + minigl.library)"
+
+# Application-owned Intuition window smoke test.
+.PHONY: gl-existing-example
+gl-existing-example: $(TARGET)
+	@mkdir -p $(EXAMPLE_DIR)
+	$(CC) $(CFLAGS) -o $(EXAMPLE_DIR)/test_gl_existing_window examples/test_gl_existing_window.c \
+		-L$(BUILD_DIR) -lSDL2 -lminigl -ldebug -lamiga -lm -lstubs

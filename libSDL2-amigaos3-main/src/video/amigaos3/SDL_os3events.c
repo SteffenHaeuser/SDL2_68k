@@ -233,7 +233,7 @@ void OS3_PumpEvents(_THIS)
     /* Walk all open SDL windows and drain their IDCMP queues */
     for (sdlwin = _this->windows; sdlwin; sdlwin = sdlwin->next) {
         data = (OS3_WindowData *)sdlwin->driverdata;
-        if (!data || !data->window) {
+        if (!data || !data->window || !data->window->UserPort || data->external_window) {
             continue;
         }
 

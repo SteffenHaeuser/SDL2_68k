@@ -1,16 +1,16 @@
 /*
   SDL2 OpenGL backend -- AmigaOS 3.x minigl.library
 
-  The current MiniGL API creates and owns the native Intuition Window as part
-  of mglCreateContext(). SDL therefore allocates its SDL_Window first, and this
-  backend attaches the MiniGL-created Window to OS3_WindowData after context
-  creation. No MiniGL API extension is required.
+  MiniGL borrows an existing native Intuition Window through
+  mglCreateContextFromWindow(). SDL owns ordinary windows; applications
+  retain ownership of windows wrapped by SDL_CreateWindowFrom().
 */
 
 #include "../../SDL_internal.h"
 
 #if SDL_VIDEO_DRIVER_AMIGAOS3 && defined(SDL_VIDEO_OPENGL)
 
+#include <stddef.h>
 #include <proto/minigl.h>
 
 #include "SDL_os3video.h"
@@ -45,9 +45,19 @@ int OS3_GL_LoadLibrary(_THIS, const char *path)
     }
 
     if (!MiniGLOpen()) {
-        return SDL_SetError("OS3: cannot open minigl.library V12+");
+        return SDL_SetError("OS3: cannot open minigl.library");
     }
 
+    if (!MiniGLDispatch ||
+        MiniGLDispatch->abiVersion != MINIGL_DISPATCH_ABI_VERSION ||
+        MiniGLDispatch->structSize <
+            offsetof(MGLDispatchTable, MGLCreateContextFromWindow) +
+            sizeof(MiniGLDispatch->MGLCreateContextFromWindow) ||
+        !MiniGLDispatch->currentContext ||
+        !MiniGLDispatch->MGLCreateContextFromWindow) {
+        MiniGLClose();
+        return SDL_SetError("OS3: minigl.library lacks the v27.2 FromWindow dispatch entry");
+    }
     os3_minigl_open = 1;
     return 0;
 }
@@ -86,44 +96,26 @@ SDL_GLContext OS3_GL_CreateContext(_THIS, SDL_Window *window)
         }
     }
 
-    /* Prefer the current display's native RTG depth when it is known. */
-    if (window->display_index < _this->num_displays) {
-        int bpp = SDL_BITSPERPIXEL(_this->displays[window->display_index].current_mode.format);
-        if (bpp > 0) {
-            depth = (bpp <= 16) ? 16 : 32;
-        }
+    iwin = data->window;
+    if (!iwin || !iwin->RPort || !iwin->RPort->BitMap) {
+        SDL_SetError("OS3: SDL window has no native drawable");
+        return NULL;
     }
-
-    mglChoosePixelDepth(depth);
+    depth = GetBitMapAttr(iwin->RPort->BitMap, BMA_DEPTH);
+    if (depth <= 8) {
+        SDL_SetError("OS3: MiniGL requires a true-color RTG window");
+        return NULL;
+    }
+    mglChoosePixelDepth(depth <= 16 ? 16 : 32);
     mglChooseNumberOfBuffers(_this->gl_config.double_buffer ? 2 : 1);
-    mglChooseWindowMode((window->flags & SDL_WINDOW_FULLSCREEN) ? GL_FALSE : GL_TRUE);
-
-    context = (SDL_GLContext)mglCreateContext(0, 0, window->w, window->h);
+    context = (SDL_GLContext)mglCreateContextFromWindow(iwin);
     if (!context) {
-        SDL_SetError("OS3: mglCreateContext(%d,%d) failed", window->w, window->h);
+        SDL_SetError("OS3: mglCreateContextFromWindow failed");
         return NULL;
     }
-
-    iwin = (struct Window *)mglGetWindowHandle();
-    if (!iwin) {
-        mglDeleteContext();
-        SDL_SetError("OS3: MiniGL context returned no Intuition window");
-        return NULL;
-    }
-
-    data->window = iwin;
-    data->screen = iwin->WScreen;
-    data->is_opengl = 1;
-    data->minigl_owns_window = 1;
     data->gl_context = context;
-    data->is_fullscreen = (window->flags & SDL_WINDOW_FULLSCREEN) ? 1 : 0;
-
-    /* SDL owns event translation. Subscribe the MiniGL Window to the same
-     * IDCMP classes used by the normal AmigaOS3 SDL window backend. */
-    ModifyIDCMP(iwin, data->is_fullscreen ? OS3_IDCMP_FULLSCREEN : OS3_IDCMP_WINDOWED);
-    SetWindowTitles(iwin,
-                    (CONST_STRPTR)(window->title ? window->title : "SDL"),
-                    (CONST_STRPTR)~0UL);
+    data->gl_width = iwin->Width - iwin->BorderLeft - iwin->BorderRight;
+    data->gl_height = iwin->Height - iwin->BorderTop - iwin->BorderBottom;
 
     OS3_GL_SelectContext(context);
     return context;
@@ -158,8 +150,11 @@ void OS3_GL_GetDrawableSize(_THIS, SDL_Window *window, int *w, int *h)
     (void)_this;
 
     if (data && data->window) {
-        if (w) *w = data->window->Width - data->window->BorderLeft - data->window->BorderRight;
-        if (h) *h = data->window->Height - data->window->BorderTop - data->window->BorderBottom;
+        int width = data->window->Width - data->window->BorderLeft - data->window->BorderRight;
+        int height = data->window->Height - data->window->BorderTop - data->window->BorderBottom;
+        OS3_GL_ResizeWindow(_this, window, width, height);
+        if (w) *w = width;
+        if (h) *h = height;
     } else {
         if (w) *w = window ? window->w : 0;
         if (h) *h = window ? window->h : 0;
@@ -175,8 +170,14 @@ void OS3_GL_ResizeWindow(_THIS, SDL_Window *window, int w, int h)
         return;
     }
 
-    OS3_GL_SelectContext((SDL_GLContext)data->gl_context);
-    mglResizeContext((GLsizei)w, (GLsizei)h);
+    if (w != data->gl_width || h != data->gl_height) {
+        GLcontext previous = *MiniGLDispatch->currentContext;
+        OS3_GL_SelectContext((SDL_GLContext)data->gl_context);
+        mglResizeContext((GLsizei)w, (GLsizei)h);
+        data->gl_width = w;
+        data->gl_height = h;
+        *MiniGLDispatch->currentContext = previous;
+    }
 }
 
 int OS3_GL_SetSwapInterval(_THIS, int interval)
@@ -213,6 +214,12 @@ int OS3_GL_SwapWindow(_THIS, SDL_Window *window)
         return SDL_SetError("OS3: SDL window has no MiniGL context");
     }
 
+    /* Host-owned windows resize outside SDL's IDCMP event loop. */
+    if (data->window) {
+        int w = data->window->Width - data->window->BorderLeft - data->window->BorderRight;
+        int h = data->window->Height - data->window->BorderTop - data->window->BorderBottom;
+        OS3_GL_ResizeWindow(_this, window, w, h);
+    }
     OS3_GL_SelectContext((SDL_GLContext)data->gl_context);
     mglSwitchDisplay();
     return 0;
@@ -221,26 +228,26 @@ int OS3_GL_SwapWindow(_THIS, SDL_Window *window)
 void OS3_GL_DeleteContext(_THIS, SDL_GLContext context)
 {
     SDL_Window *window;
-    (void)_this;
+    GLcontext previous;
 
     if (!context) {
         return;
     }
 
-    /* Clear the association before MiniGL destroys its native window. */
+    previous = *MiniGLDispatch->currentContext;
+    /* Delete only the context; the native window remains valid. */
     for (window = _this->windows; window; window = window->next) {
         OS3_WindowData *data = (OS3_WindowData *)window->driverdata;
         if (data && data->gl_context == context) {
             data->gl_context = NULL;
-            data->window = NULL;
-            data->screen = NULL;
-            data->minigl_owns_window = 0;
+            data->gl_width = data->gl_height = 0;
             break;
         }
     }
 
     OS3_GL_SelectContext(context);
     mglDeleteContext();
+    OS3_GL_SelectContext(previous == (GLcontext)context ? NULL : (SDL_GLContext)previous);
 }
 
 /* The MiniGL SDK exposes GL entry points as static inline dispatch wrappers.

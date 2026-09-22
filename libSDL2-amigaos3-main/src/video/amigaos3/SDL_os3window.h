@@ -9,7 +9,7 @@
 #include "../SDL_sysvideo.h"
 
 
-/* IDCMP flags shared by normal and MiniGL-owned Intuition windows. */
+/* IDCMP flags for SDL-owned Intuition windows. */
 #define OS3_IDCMP_WINDOWED \
     (IDCMP_CLOSEWINDOW   | \
      IDCMP_RAWKEY        | \
@@ -27,6 +27,8 @@
      IDCMP_INACTIVEWINDOW)
 
 extern int  OS3_CreateWindow(_THIS, SDL_Window *window);
+extern int  OS3_CreateWindowFrom(_THIS, SDL_Window *window, const void *native);
+extern SDL_bool OS3_HasFixedNativeWindow(SDL_Window *window);
 extern void OS3_DestroyWindow(_THIS, SDL_Window *window);
 extern void OS3_SetWindowTitle(_THIS, SDL_Window *window);
 extern void OS3_SetWindowFullscreen(_THIS, SDL_Window *window,

@@ -2657,6 +2657,16 @@ int SDL_SetWindowFullscreen(SDL_Window *window, Uint32 flags)
         return 0;
     }
 
+#if SDL_VIDEO_DRIVER_AMIGAOS3
+    /* FromWindow contexts cannot migrate to a replacement native window.
+     * Reject before SDL changes display modes or fullscreen bookkeeping. */
+    {
+        extern SDL_bool OS3_HasFixedNativeWindow(SDL_Window *window);
+        if (SDL_strcmp(_this->name, "amigaos3") == 0 && OS3_HasFixedNativeWindow(window)) {
+            return SDL_SetError("OS3: cannot change fullscreen on a foreign window or with a live GL context");
+        }
+    }
+#endif
     /* clear the previous flags and OR in the new ones */
     oldflags = window->flags & FULLSCREEN_MASK;
     window->flags &= ~FULLSCREEN_MASK;

@@ -98,6 +98,7 @@ ULONG OS3_FindRTGMode(int want_w, int want_h, int want_depth)
 /* --- Internal: close window and screen, leaving driverdata allocated --- */
 static void OS3_CloseWindowAndScreen(OS3_WindowData *data)
 {
+    if (data->external_window) return;
     if (data->window) {
         ClearPointer(data->window);
         CloseWindow(data->window);
@@ -330,14 +331,11 @@ int OS3_CreateWindow(_THIS, SDL_Window *window)
 
     fullscreen = (window->flags & SDL_WINDOW_FULLSCREEN) ? 1 : 0;
 
-    /* MiniGL currently creates/owns its native Intuition window when the
-     * GL context is created. For SDL_WINDOW_OPENGL only allocate driverdata
-     * here; OS3_GL_CreateContext() fills data->window via mglGetWindowHandle(). */
-    if (window->flags & SDL_WINDOW_OPENGL) {
-        data->is_opengl = 1;
-        data->is_fullscreen = fullscreen;
-        window->driverdata = data;
-        return 0;
+    /* MiniGL borrows the same native window as the SDL window backend. */
+    data->is_opengl = (window->flags & SDL_WINDOW_OPENGL) != 0;
+    if (data->is_opengl && !CyberGfxBase) {
+        SDL_free(data);
+        return SDL_SetError("OS3: MiniGL requires an RTG display");
     }
 
     if (fullscreen) {
@@ -355,6 +353,49 @@ int OS3_CreateWindow(_THIS, SDL_Window *window)
     return 0;
 }
 
+int OS3_CreateWindowFrom(_THIS, SDL_Window *window, const void *native)
+{
+    struct Window *iwin = (struct Window *)native;
+    OS3_WindowData *data;
+    SDL_Window *other;
+    int w, h;
+
+    if (!iwin || !iwin->WScreen || !iwin->RPort || !iwin->RPort->BitMap)
+        return SDL_SetError("OS3: SDL_CreateWindowFrom requires a live Intuition Window");
+    if (!(window->flags & SDL_WINDOW_OPENGL))
+        return SDL_SetError("OS3: set SDL_HINT_VIDEO_FOREIGN_WINDOW_OPENGL before wrapping a window");
+    if (!CyberGfxBase || GetBitMapAttr(iwin->RPort->BitMap, BMA_DEPTH) <= 8)
+        return SDL_SetError("OS3: foreign OpenGL windows require a true-color RTG display");
+    for (other = _this->windows; other; other = other->next) {
+        data = (OS3_WindowData *)other->driverdata;
+        if (data && data->window == iwin)
+            return SDL_SetError("OS3: native window already has an SDL wrapper");
+    }
+    w = iwin->Width - iwin->BorderLeft - iwin->BorderRight;
+    h = iwin->Height - iwin->BorderTop - iwin->BorderBottom;
+    if (w <= 0 || h <= 0)
+        return SDL_SetError("OS3: native window has no drawable client area");
+    data = (OS3_WindowData *)SDL_calloc(1, sizeof(*data));
+    if (!data) return SDL_OutOfMemory();
+    data->window = iwin;
+    /* screen is reserved for screens owned by SDL, never the host screen. */
+    data->external_window = 1;
+    data->is_opengl = 1;
+    window->driverdata = data;
+    window->x = iwin->LeftEdge;
+    window->y = iwin->TopEdge;
+    window->w = w;
+    window->h = h;
+    window->flags |= SDL_WINDOW_SHOWN;
+    return 0;
+}
+
+SDL_bool OS3_HasFixedNativeWindow(SDL_Window *window)
+{
+    OS3_WindowData *data = (OS3_WindowData *)window->driverdata;
+    return data && (data->external_window || data->gl_context) ? SDL_TRUE : SDL_FALSE;
+}
+
 void OS3_SetWindowFullscreen(_THIS, SDL_Window *window,
                              SDL_VideoDisplay *display, SDL_bool fullscreen)
 {
@@ -362,15 +403,13 @@ void OS3_SetWindowFullscreen(_THIS, SDL_Window *window,
     OS3_DisplayData *disp_data = display ? (OS3_DisplayData *)display->driverdata : NULL;
     struct Window *iwin;
 
-    if (!data || window->is_destroying) {
+    if (!data || data->external_window || window->is_destroying) {
         return;
     }
 
-    /* MiniGL has no API yet to move an existing context between windowed
-     * and fullscreen native windows. Initial fullscreen is selected before
-     * mglCreateContext(); runtime toggles keep the existing native window. */
-    if (data->is_opengl) {
-        data->is_fullscreen = fullscreen ? 1 : 0;
+    /* Never replace a native window while a context is borrowing it. */
+    if (data->gl_context) {
+        /* Keep the ownership state established when the window was opened. */
 #if defined(SDL_VIDEO_OPENGL)
         if (data->gl_context && data->window) {
             int iw = data->window->Width - data->window->BorderLeft - data->window->BorderRight;
@@ -462,15 +501,14 @@ void OS3_DestroyWindow(_THIS, SDL_Window *window)
     /* Destroy framebuffer surface first */
     OS3_DestroyWindowFramebuffer(_this, window);
 
-    if (data->minigl_owns_window) {
-        /* MiniGL destroys the native Window with its context. Never call
-         * CloseWindow() on it from the SDL window backend. */
-        data->window = NULL;
-        data->screen = NULL;
-    } else {
-        /* Close window before screen -- mandatory order per ADCD */
-        OS3_CloseWindowAndScreen(data);
+#if defined(SDL_VIDEO_OPENGL)
+    if (data->gl_context) {
+        /* Context must be deleted while its borrowed native window is live. */
+        OS3_GL_DeleteContext(_this, (SDL_GLContext)data->gl_context);
     }
+#endif
+    /* External windows/screens remain with their application owner. */
+    OS3_CloseWindowAndScreen(data);
 
     SDL_free(data);
     window->driverdata = NULL;
@@ -480,7 +518,7 @@ void OS3_SetWindowTitle(_THIS, SDL_Window *window)
 {
     OS3_WindowData *data = (OS3_WindowData *)window->driverdata;
 
-    if (!data || !data->window) {
+    if (!data || !data->window || data->external_window) {
         return;
     }
 
@@ -508,7 +546,7 @@ void OS3_RaiseWindow(_THIS, SDL_Window *window)
 {
     OS3_WindowData *data = (OS3_WindowData *)window->driverdata;
 
-    if (!data || !data->window) {
+    if (!data || !data->window || data->external_window) {
         return;
     }
 
